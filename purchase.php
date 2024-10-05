@@ -42,10 +42,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $data['item_name'], $data['description_configuration'], $data['vendor_name'],
             $data['quantity'], $data['rate_per_piece'], $data['gst_amount']
         ]);
+
+        // Update stock table: add purchase entry or create new record
+        $updateStockStmt = $pdo->prepare('
+            INSERT INTO stock (item_code, purchase_qty) 
+            VALUES (?, ?) 
+            ON DUPLICATE KEY UPDATE purchase_qty = purchase_qty + ?
+        ');
+        $updateStockStmt->execute([$data['item_code'], $data['quantity'], $data['quantity']]);
+
         echo json_encode(['success' => true, 'message' => 'Purchase record added successfully']);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
     }
+
     exit;
 }
 
@@ -61,17 +71,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'PUT') {
     }
 
     try {
-        $stmt = $pdo->prepare('UPDATE purchase SET item_code = ?, invoice_number = ?, item_name = ?, description_configuration = ?, vendor_name = ?, quantity = ?, rate_per_piece = ?, gst_amount = ? WHERE po_number = ?');
-        $stmt->execute([
+        // Fetch old quantity to calculate difference
+        $stmt = $pdo->prepare('SELECT quantity FROM purchase WHERE po_number = ?');
+        $stmt->execute([$data['po_number']]);
+        $oldQuantity = $stmt->fetchColumn();
+
+        // Update purchase record
+        $updatePurchaseStmt = $pdo->prepare('
+            UPDATE purchase 
+            SET item_code = ?, invoice_number = ?, item_name = ?, description_configuration = ?, vendor_name = ?, quantity = ?, rate_per_piece = ?, gst_amount = ? 
+            WHERE po_number = ?
+        ');
+        $updatePurchaseStmt->execute([
             $data['item_code'], $data['invoice_number'], $data['item_name'],
             $data['description_configuration'], $data['vendor_name'],
             $data['quantity'], $data['rate_per_piece'], $data['gst_amount'],
             $data['po_number']
         ]);
+
+        // Update stock based on the quantity difference
+        $quantityDifference = $data['quantity'] - $oldQuantity;
+        if ($quantityDifference !== 0) {
+            $updateStockStmt = $pdo->prepare('
+                INSERT INTO stock (item_code, purchase_qty) 
+                VALUES (?, ?) 
+                ON DUPLICATE KEY UPDATE purchase_qty = purchase_qty + ?
+            ');
+            $updateStockStmt->execute([$data['item_code'], $quantityDifference, $quantityDifference]);
+        }
+
         echo json_encode(['success' => true, 'message' => 'Purchase record updated successfully']);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
     }
+
     exit;
 }
 
@@ -85,12 +118,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'DELETE') {
     }
 
     try {
-        $stmt = $pdo->prepare('DELETE FROM purchase WHERE po_number = ?');
+        // Fetch the quantity and item code before deletion
+        $stmt = $pdo->prepare('SELECT quantity, item_code FROM purchase WHERE po_number = ?');
         $stmt->execute([$data['po_number']]);
+        $purchase = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$purchase) {
+            echo json_encode(['success' => false, 'error' => 'Purchase record not found']);
+            exit;
+        }
+
+        // Delete the purchase record
+        $deleteStmt = $pdo->prepare('DELETE FROM purchase WHERE po_number = ?');
+        $deleteStmt->execute([$data['po_number']]);
+
+        // Update stock (decrement distribution_entry)
+        $updateStockStmt = $pdo->prepare('
+            INSERT INTO stock (item_code, distribution_entry) 
+            VALUES (?, ?) 
+            ON DUPLICATE KEY UPDATE distribution_entry = distribution_entry + ?
+        ');
+        $updateStockStmt->execute([$purchase['item_code'], $purchase['quantity'], $purchase['quantity']]);
+
         echo json_encode(['success' => true, 'message' => 'Purchase record deleted successfully']);
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
     }
+
     exit;
 }
 
